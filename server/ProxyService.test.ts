@@ -2,17 +2,8 @@ import { fetchQuotes } from './ProxyService';
 import axios from 'axios';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock axios (used by loadTotalShares for TWSE OpenAPI)
 vi.mock('axios');
 const mockedAxios = vi.mocked(axios);
-
-// vi.mock is hoisted, so use vi.hoisted() to initialise mockQuote before the factory runs
-const mockQuote = vi.hoisted(() => vi.fn());
-vi.mock('yahoo-finance2', () => ({
-  default: class YahooFinance {
-    quote = mockQuote;
-  },
-}));
 
 // ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -23,38 +14,74 @@ const sharesResponse = {
   ],
 };
 
-// Yahoo Finance volumes are in shares; 5,000,000 shares = 5,000 張
-const yahooQuotes = [
-  {
-    symbol: '2330.TW',
-    shortName: '台積電',
-    regularMarketPrice:         1000,
-    regularMarketPreviousClose:  980,
-    regularMarketVolume:     5000000,
-    regularMarketDayHigh:       1010,
-    regularMarketDayLow:         975,
+// TWSE MIS response during market hours (z = valid price)
+const twseMisOpen = {
+  data: {
+    msgArray: [
+      { c: '2330', z: '1000', y: '980',  v: '5000', h: '1010', l: '975', n: '台積電', ex: 'tse' },
+      { c: '2317', z: '200',  y: '195',  v: '3000', h: '205',  l: '190', n: '鴻海',   ex: 'tse' },
+    ],
   },
-  {
-    symbol: '2317.TW',
-    shortName: '鴻海',
-    regularMarketPrice:          200,
-    regularMarketPreviousClose:  195,
-    regularMarketVolume:     3000000,
-    regularMarketDayHigh:        205,
-    regularMarketDayLow:         190,
+};
+
+// TWSE MIS response when market is closed (z = "-")
+const twseMisClosed = {
+  data: {
+    msgArray: [
+      { c: '2330', z: '-', y: '980', v: '5000', h: '1010', l: '975', n: '台積電', ex: 'tse' },
+    ],
   },
-];
+};
+
+// Yahoo Finance v8/chart response (used as fallback)
+const yahooChartTsmc = {
+  data: {
+    chart: {
+      result: [{
+        meta: {
+          regularMarketPrice:    1000,
+          previousClose:          980,
+          regularMarketVolume: 5000000,
+          regularMarketDayHigh:  1010,
+          regularMarketDayLow:    975,
+          shortName:            '台積電',
+        },
+      }],
+    },
+  },
+};
+
+// ── Mock helper ────────────────────────────────────────────────────────────────
+
+function setupMocks(opts: {
+  twse?:      any;
+  yahoo?:     any;
+  twseFails?: boolean;
+  yahooFails?: boolean;
+} = {}) {
+  mockedAxios.get.mockImplementation((url: string) => {
+    if (url.includes('openapi.twse.com.tw'))  return Promise.resolve(sharesResponse);
+    if (url.includes('mis.twse.com.tw')) {
+      if (opts.twseFails) return Promise.reject(new Error('TWSE network error'));
+      return Promise.resolve(opts.twse ?? twseMisOpen);
+    }
+    if (url.includes('finance.yahoo.com')) {
+      if (opts.yahooFails) return Promise.reject(new Error('Yahoo network error'));
+      return Promise.resolve(opts.yahoo ?? yahooChartTsmc);
+    }
+    return Promise.reject(new Error(`Unexpected URL: ${url}`));
+  });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockedAxios.get.mockResolvedValue(sharesResponse);
-  mockQuote.mockResolvedValue(yahooQuotes);
+  setupMocks();
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('ProxyService.fetchQuotes', () => {
-  it('fetches and maps quotes including dayHigh/dayLow', async () => {
+  it('fetches and maps TWSE quotes during market hours', async () => {
     const quotes = await fetchQuotes(['2330.TW', '2317.TW']);
 
     expect(quotes).toHaveLength(2);
@@ -70,18 +97,68 @@ describe('ProxyService.fetchQuotes', () => {
     expect(tsmc.dayLow).toBe(975);
     // totalSharesK: 25,930,380,000 shares ÷ 1000 = 25,930,380 張
     expect(tsmc.totalSharesK).toBe(25930380);
+    // volume: TWSE v field is already in 張
+    expect(tsmc.volume).toBe(5000);
   });
 
-  it('returns correct changePercent outside market hours (no z="-" fallback issue)', async () => {
-    mockQuote.mockResolvedValue([{
-      symbol: '2330.TW',
-      shortName: '台積電',
-      regularMarketPrice:         2265,
-      regularMarketPreviousClose: 2350,
-      regularMarketVolume:        3500000,
-      regularMarketDayHigh:       2380,
-      regularMarketDayLow:        2240,
-    }]);
+  it('falls back to Yahoo Finance when TWSE returns z="-" (market closed)', async () => {
+    setupMocks({ twse: twseMisClosed });
+
+    const quotes = await fetchQuotes(['2330.TW']);
+
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0].symbol).toBe('2330.TW');
+    expect(quotes[0].price).toBe(1000);
+    expect(quotes[0].prevClose).toBe(980);
+    expect(quotes[0].changePercent).toBeCloseTo(2.04, 1);
+  });
+
+  it('falls back to Yahoo Finance when TWSE API fails entirely', async () => {
+    setupMocks({ twseFails: true });
+
+    const quotes = await fetchQuotes(['2330.TW']);
+
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0].price).toBe(1000);
+    expect(quotes[0].prevClose).toBe(980);
+  });
+
+  it('returns correct changePercent for negative change (TWSE primary)', async () => {
+    setupMocks({
+      twse: {
+        data: {
+          msgArray: [
+            { c: '2330', z: '2265', y: '2350', v: '3500', h: '2380', l: '2240', n: '台積電', ex: 'tse' },
+          ],
+        },
+      },
+    });
+
+    const quotes = await fetchQuotes(['2330.TW']);
+    expect(quotes[0].change).toBe(-85);
+    expect(quotes[0].changePercent).toBeCloseTo(-3.62, 1);
+  });
+
+  it('returns correct changePercent for negative change (Yahoo fallback)', async () => {
+    setupMocks({
+      twse: twseMisClosed,
+      yahoo: {
+        data: {
+          chart: {
+            result: [{
+              meta: {
+                regularMarketPrice:    2265,
+                previousClose:         2350,
+                regularMarketVolume: 3500000,
+                regularMarketDayHigh:  2380,
+                regularMarketDayLow:   2240,
+                shortName:            '台積電',
+              },
+            }],
+          },
+        },
+      },
+    });
 
     const quotes = await fetchQuotes(['2330.TW']);
     expect(quotes[0].change).toBe(-85);
@@ -89,36 +166,48 @@ describe('ProxyService.fetchQuotes', () => {
   });
 
   it('uses exact code match — no substring collision (2330 ≠ 23309)', async () => {
-    mockQuote.mockResolvedValue([{
-      symbol: '2330.TW',
-      shortName: '台積電',
-      regularMarketPrice:         1000,
-      regularMarketPreviousClose:  980,
-      regularMarketVolume:        5000000,
-      regularMarketDayHigh:       1010,
-      regularMarketDayLow:         975,
-    }]);
+    setupMocks({
+      twse: {
+        data: {
+          msgArray: [
+            { c: '2330', z: '1000', y: '980', v: '5000', h: '1010', l: '975', n: '台積電', ex: 'tse' },
+          ],
+        },
+      },
+    });
 
     const quotes = await fetchQuotes(['2330.TW', '23309.TW']);
-    expect(quotes[0].symbol).toBe('2330.TW');
+    // 2330.TW comes from TWSE (exact match); 23309.TW falls back to Yahoo
+    expect(quotes.find(q => q.symbol === '2330.TW')?.price).toBe(1000);
+    expect(quotes.find(q => q.symbol === '2330.TW')?.symbol).toBe('2330.TW');
   });
 
-  it('returns empty array for empty symbol list without calling Yahoo Finance', async () => {
+  it('returns empty array for empty symbol list without calling any APIs', async () => {
     const quotes = await fetchQuotes([]);
     expect(quotes).toEqual([]);
-    expect(mockQuote).not.toHaveBeenCalled();
+    expect(mockedAxios.get).not.toHaveBeenCalled();
   });
 
-  it('returns empty array when Yahoo Finance call fails', async () => {
-    mockQuote.mockRejectedValue(new Error('network error'));
+  it('returns empty array when both TWSE and Yahoo Finance fail', async () => {
+    setupMocks({ twseFails: true, yahooFails: true });
     const quotes = await fetchQuotes(['2330.TW']);
     expect(quotes).toEqual([]);
   });
 
-  it('calculates volumeRatio from Yahoo Finance shares volume', async () => {
-    // 5,000,000 shares ÷ 25,930,380,000 total shares × 100 = 0.0193%
+  it('calculates volumeRatio from TWSE volume in 張', async () => {
+    // 5000 張 = 5,000,000 shares; total = 25,930,380,000 shares
+    // ratio = 5,000,000 / 25,930,380,000 × 100 ≈ 0.0193%
     const quotes = await fetchQuotes(['2330.TW', '2317.TW']);
     expect(quotes[0].volumeRatio).not.toBeNull();
-    expect(quotes[0].volume).toBe(5000); // 5,000,000 shares ÷ 1000 = 5,000 張
+    expect(quotes[0].volume).toBe(5000);
+  });
+
+  it('calculates volumeRatio from Yahoo Finance volume (fallback path)', async () => {
+    setupMocks({ twse: twseMisClosed });
+
+    // Yahoo returns 5,000,000 shares → 5,000 張
+    const quotes = await fetchQuotes(['2330.TW']);
+    expect(quotes[0].volume).toBe(5000);
+    expect(quotes[0].volumeRatio).not.toBeNull();
   });
 });
