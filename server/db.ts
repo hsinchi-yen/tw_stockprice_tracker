@@ -2,7 +2,9 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const dataDir = path.join(process.cwd(), 'data');
+// Resolve relative to this file so the DB path is stable regardless of cwd.
+// DB_DIR env var overrides (useful for testing or custom mounts).
+const dataDir = process.env.DB_DIR ?? path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const db = new Database(path.join(dataDir, 'stocks.db'));

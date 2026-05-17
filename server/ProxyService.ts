@@ -17,29 +17,36 @@ export interface QuoteData {
 // ── Daily cache for total outstanding shares ───────────────────────────────────
 let sharesCache: Map<string, number> = new Map();
 let sharesCacheDate = '';
+let sharesFetchPromise: Promise<Map<string, number>> | null = null;
 
 async function loadTotalShares(): Promise<Map<string, number>> {
   const today = new Date().toISOString().split('T')[0];
   if (sharesCacheDate === today && sharesCache.size > 0) return sharesCache;
 
-  try {
-    const res = await axios.get(
-      'https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
-      { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }
-    );
-    const rows: any[] = Array.isArray(res.data) ? res.data : [];
-    sharesCache = new Map();
-    rows.forEach(row => {
-      const code   = row['公司代號'];
-      const shares = parseInt((row['已發行普通股數或TDR原股發行股數'] ?? '').replace(/,/g, ''), 10);
-      if (code && !isNaN(shares) && shares > 0) sharesCache.set(code, shares);
-    });
-    sharesCacheDate = today;
-    console.log(`[ProxyService] Loaded shares for ${sharesCache.size} stocks`);
-  } catch (e: any) {
-    console.error('[ProxyService] Failed to load total shares:', e.message);
+  // Deduplicate concurrent fetches — only one HTTP call at a time
+  if (!sharesFetchPromise) {
+    sharesFetchPromise = (async () => {
+      try {
+        const res = await axios.get(
+          'https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
+          { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }
+        );
+        const rows: any[] = Array.isArray(res.data) ? res.data : [];
+        sharesCache = new Map();
+        rows.forEach(row => {
+          const code   = row['公司代號'];
+          const shares = parseInt((row['已發行普通股數或TDR原股發行股數'] ?? '').replace(/,/g, ''), 10);
+          if (code && !isNaN(shares) && shares > 0) sharesCache.set(code, shares);
+        });
+        sharesCacheDate = today;
+        console.log(`[ProxyService] Loaded shares for ${sharesCache.size} stocks`);
+      } catch (e: any) {
+        console.error('[ProxyService] Failed to load total shares:', e.message);
+      }
+      return sharesCache;
+    })().finally(() => { sharesFetchPromise = null; });
   }
-  return sharesCache;
+  return sharesFetchPromise;
 }
 
 // ── Normalise a ticker to its bare exchange code ──────────────────────────────
@@ -99,9 +106,9 @@ function buildFromTwse(
   if (isNaN(price) || isNaN(prevClose)) return null;
 
   const code      = row.c;
-  const change    = parseFloat((price - prevClose).toFixed(2));
+  const change    = Math.round((price - prevClose) * 100) / 100;
   const changePct = prevClose !== 0
-    ? parseFloat(((change / prevClose) * 100).toFixed(2))
+    ? Math.round((change / prevClose) * 10000) / 100
     : 0;
 
   const volumeZhang  = parseInt(row.v, 10) || 0;
@@ -181,9 +188,9 @@ function buildFromYahoo(
 ): QuoteData {
   const code      = codeFromTicker(symbol);
   const { price, prevClose, volume, dayHigh, dayLow, name } = chart;
-  const change    = parseFloat((price - prevClose).toFixed(2));
+  const change    = Math.round((price - prevClose) * 100) / 100;
   const changePct = prevClose !== 0
-    ? parseFloat(((change / prevClose) * 100).toFixed(2))
+    ? Math.round((change / prevClose) * 10000) / 100
     : 0;
 
   const volumeShares = volume * 1000;

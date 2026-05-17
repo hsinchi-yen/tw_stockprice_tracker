@@ -21,8 +21,8 @@ keeping the directory structure intact:
 TwStockPriceTracker/                 <-- project root
 ├── docker_deployment/
 │   ├── Dockerfile.backend
-│   ├── Dockerfile.frontend
-│   ├── nginx.conf
+│   ├── Dockerfile.frontend.yocto    <-- used by run_docker.sh for Yocto
+│   ├── nginx-yocto.conf             <-- nginx config (host-network, proxies to 127.0.0.1)
 │   ├── run_docker.sh
 │   └── DEPLOY_YOCTO.md              <-- this file
 ├── server/
@@ -34,7 +34,6 @@ TwStockPriceTracker/                 <-- project root
 │   ├── main.ts
 │   ├── ApiClient.ts
 │   ├── AlertEvaluator.ts
-│   ├── StateManager.ts
 │   └── style.css
 ├── index.html
 ├── package.json

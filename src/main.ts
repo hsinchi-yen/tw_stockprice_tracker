@@ -1,6 +1,5 @@
 import { evaluateAlertStatus } from './AlertEvaluator';
-import { getStocks, addStocks, updateStock, removeStock, fetchQuotes, StockConfig } from './ApiClient';
-import type { QuoteData } from '../server/ProxyService';
+import { getStocks, addStocks, updateStock, removeStock, fetchQuotes, StockConfig, QuoteData } from './ApiClient';
 
 // ── State ────────────────────────────────────────────────────────────────────
 let allStocks: StockConfig[] = [];
@@ -14,9 +13,13 @@ let gridRows    = parseInt(localStorage.getItem('twstock-rows') ?? '5', 10) as 4
 
 function cardsPerPage() { return 6 * gridRows; }
 
-let thresholdPercent = 0.0005; // 0.05% — price target proximity sensitivity
-const VOLUME_THRESHOLD = 5.0;  // S1: 5% turnover rate = notable volume
-const MOMENTUM_MIN_PCT = 0.05; // S2: show velocity indicator when ≥ 0.05% move per refresh
+let nearingBandFraction = 0.0005; // fraction: 0.0005 = 0.05% proximity band
+const VOLUME_THRESHOLD    = 5.0;  // S1: 5% turnover rate = notable volume
+const MOMENTUM_MIN_PCT    = 0.05; // S2: show velocity indicator when ≥ 0.05% move per refresh
+const REFRESH_OPEN_MS     = 15_000;   // poll interval during market hours
+const REFRESH_CLOSED_MS   = 300_000;  // poll interval when market is closed
+const FLASH_DURATION_MS   = 1_500;    // search not-found flash duration
+const HIGHLIGHT_MS        = 1_600;    // card highlight after search jump
 
 type SortMode = 'none' | 'change-desc' | 'change-asc' | 'volume-desc';
 let sortMode: SortMode = 'none';
@@ -24,11 +27,16 @@ let refreshTimer: number;
 
 // ── Custom order (drag-and-drop) ──────────────────────────────────────────────
 let dragSrcTicker: string | null = null;
+let _cachedOrder: string[] | null = null;
 
 function loadCustomOrder(): string[] {
-  try { return JSON.parse(localStorage.getItem('twstock-order') ?? '[]'); } catch { return []; }
+  if (_cachedOrder !== null) return _cachedOrder;
+  try { _cachedOrder = JSON.parse(localStorage.getItem('twstock-order') ?? '[]'); }
+  catch { _cachedOrder = []; }
+  return _cachedOrder!;
 }
 function saveCustomOrder(tickers: string[]) {
+  _cachedOrder = tickers;
   localStorage.setItem('twstock-order', JSON.stringify(tickers));
 }
 function applyCustomOrder(stocks: StockConfig[]): StockConfig[] {
@@ -59,7 +67,7 @@ function updateMarketStatus() {
   label.textContent = status === 'open' ? '盤中' : '休市';
 
   clearInterval(refreshTimer);
-  const interval = status === 'open' ? 15000 : 300000;
+  const interval = status === 'open' ? REFRESH_OPEN_MS : REFRESH_CLOSED_MS;
   refreshTimer   = window.setInterval(doRefresh, interval);
 }
 
@@ -119,7 +127,7 @@ function buildCard(stock: StockConfig): HTMLElement {
 
   card.innerHTML = `
     <div class="card-header">
-      <span class="symbol">${tickerShort}</span>
+      <span class="symbol"></span>
       <button class="remove-btn" title="移除">✕</button>
     </div>
     <div class="name" title="">讀取中...</div>
@@ -129,17 +137,22 @@ function buildCard(stock: StockConfig): HTMLElement {
     </div>
     <div class="volume">--</div>
     <div class="targets">
-      <label>買<input type="number" class="buy-input"  value="${stock.buyTarget  ?? ''}" placeholder="--" step="0.5"></label>
-      <label>賣<input type="number" class="sell-input" value="${stock.sellTarget ?? ''}" placeholder="--" step="0.5"></label>
+      <label>買<input type="number" class="buy-input"  placeholder="--" step="0.5"></label>
+      <label>賣<input type="number" class="sell-input" placeholder="--" step="0.5"></label>
     </div>`;
+  (card.querySelector('.symbol') as HTMLElement).textContent = tickerShort;
+  const buyInput  = card.querySelector('.buy-input')  as HTMLInputElement;
+  const sellInput = card.querySelector('.sell-input') as HTMLInputElement;
+  if (stock.buyTarget  != null) buyInput.value  = String(stock.buyTarget);
+  if (stock.sellTarget != null) sellInput.value = String(stock.sellTarget);
 
-  card.querySelector('.buy-input')!.addEventListener('change', (e: any) => {
-    const v = parseFloat(e.target.value);
+  buyInput.addEventListener('change', (e: Event) => {
+    const v = parseFloat((e.target as HTMLInputElement).value);
     updateStock(stock.ticker, { buyTarget: isNaN(v) ? null : v });
     stock.buyTarget = isNaN(v) ? null : v;
   });
-  card.querySelector('.sell-input')!.addEventListener('change', (e: any) => {
-    const v = parseFloat(e.target.value);
+  sellInput.addEventListener('change', (e: Event) => {
+    const v = parseFloat((e.target as HTMLInputElement).value);
     updateStock(stock.ticker, { sellTarget: isNaN(v) ? null : v });
     stock.sellTarget = isNaN(v) ? null : v;
   });
@@ -192,7 +205,7 @@ function buildCard(stock: StockConfig): HTMLElement {
 
 function applyQuoteToCard(card: HTMLElement, stock: StockConfig, q: CachedQuote) {
   const status = evaluateAlertStatus(
-    q.price, stock.buyTarget, stock.sellTarget, thresholdPercent,
+    q.price, stock.buyTarget, stock.sellTarget, nearingBandFraction,
     q.volumeRatio, VOLUME_THRESHOLD,
   );
   card.className = 'card' + (status !== 'normal' ? ` status-${status}` : '');
@@ -260,7 +273,7 @@ function searchStock() {
 
   if (idx === -1) {
     input.classList.add('not-found');
-    setTimeout(() => input.classList.remove('not-found'), 1500);
+    setTimeout(() => input.classList.remove('not-found'), FLASH_DURATION_MS);
     return;
   }
 
@@ -276,7 +289,7 @@ function searchStock() {
     card.classList.remove('card-highlight');
     void (card as HTMLElement).offsetWidth; // restart animation
     card.classList.add('card-highlight');
-    setTimeout(() => card.classList.remove('card-highlight'), 1600);
+    setTimeout(() => card.classList.remove('card-highlight'), HIGHLIGHT_MS);
   }
 }
 
@@ -318,9 +331,9 @@ async function setupEvents() {
 
   const slider = document.getElementById('sensitivity-slider') as HTMLInputElement;
   slider.addEventListener('input', (e: any) => {
-    const v = parseFloat(e.target.value);
+    const v = parseFloat((e.target as HTMLInputElement).value);
     (document.getElementById('sensitivity-val') as HTMLElement).textContent = `${v}%`;
-    thresholdPercent = v / 100;
+    nearingBandFraction = v / 100;
   });
 
   (['none', 'change-desc', 'change-asc', 'volume-desc'] as SortMode[]).forEach(m => {

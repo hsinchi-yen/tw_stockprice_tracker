@@ -1,3 +1,7 @@
+import type { QuoteData } from '../server/ProxyService';
+
+export type { QuoteData };
+
 const BASE = '';
 
 export interface StockConfig {
@@ -33,7 +37,7 @@ export async function removeStock(ticker: string): Promise<void> {
   });
 }
 
-export async function fetchQuotes(symbols: string[]): Promise<any[]> {
+export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
   if (symbols.length === 0) return [];
   const res = await fetch(`${BASE}/api/quotes?symbols=${symbols.join(',')}`);
   return res.json();
