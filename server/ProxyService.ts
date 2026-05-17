@@ -1,4 +1,8 @@
 import axios from 'axios';
+import YahooFinance from 'yahoo-finance2';
+
+// Singleton instance — yahoo-finance2 v3 requires instantiation (static calls are deprecated)
+const yahooFinance = new YahooFinance();
 
 export interface QuoteData {
   symbol:        string;
@@ -49,57 +53,58 @@ function codeFromTicker(ticker: string): string {
 }
 
 // ── Quote fetcher ─────────────────────────────────────────────────────────────
+// Uses Yahoo Finance so changePercent is correct both during and outside market hours.
+// TWSE MIS API returned z="-" on weekends/holidays, making price===prevClose (change=0).
 export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
   if (symbols.length === 0) return [];
 
   const sharesMap = await loadTotalShares();
 
   try {
-    const queries = symbols.map(s => {
-      const id = codeFromTicker(s);
-      return `tse_${id}.tw|otc_${id}.tw`;
-    }).join('|');
+    const raw       = await yahooFinance.quote(symbols);
+    const quotesArr = Array.isArray(raw) ? raw : [raw];
 
-    const url      = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${queries}`;
-    const response = await axios.get(url, { timeout: 8000 });
-    const results: any[] = response.data?.msgArray || [];
+    return quotesArr
+      .filter(q => q != null && q.regularMarketPrice != null)
+      .map(q => {
+        const code      = codeFromTicker(q.symbol);
+        const price     = q.regularMarketPrice!;
+        const prevClose = q.regularMarketPreviousClose ?? price;
+        const change    = parseFloat((price - prevClose).toFixed(2));
+        const changePct = prevClose !== 0
+          ? parseFloat(((change / prevClose) * 100).toFixed(2))
+          : 0;
 
-    return results
-      .filter(item => item.c)
-      .map(item => {
-        const price     = parseFloat(item.z !== '-' ? item.z : item.y);
-        const prevClose = parseFloat(item.y);
-        const change    = isNaN(price) || isNaN(prevClose) ? 0 : price - prevClose;
-        const changePct = prevClose !== 0 ? (change / prevClose) * 100 : 0;
-        const volume    = parseInt(item.v, 10) || 0;
+        // Yahoo Finance volume is in shares; convert to 張 (lots of 1000 shares)
+        const volumeShares = q.regularMarketVolume ?? 0;
+        const volume       = Math.round(volumeShares / 1000);
 
-        const totalShares = sharesMap.get(item.c);
+        const totalShares  = sharesMap.get(code);
         const totalSharesK = totalShares ? Math.round(totalShares / 1000) : null;
-        const volumeRatio = totalShares
-          ? parseFloat(((volume * 1000 / totalShares) * 100).toFixed(4))
+        const volumeRatio  = totalShares
+          ? parseFloat(((volumeShares / totalShares) * 100).toFixed(4))
           : null;
 
         // Exact code match prevents substring collisions (e.g. 2330 vs 23309)
         const originalSymbol =
-          symbols.find(s => codeFromTicker(s) === item.c.toUpperCase()) ??
-          `${item.c}.TW`;
+          symbols.find(s => codeFromTicker(s) === code) ?? q.symbol;
 
         return {
           symbol:        originalSymbol,
-          name:          item.n || item.c,
-          price:         isNaN(price)     ? 0 : price,
-          prevClose:     isNaN(prevClose) ? 0 : prevClose,
-          change:        parseFloat(change.toFixed(2)),
-          changePercent: parseFloat(changePct.toFixed(2)),
+          name:          q.shortName ?? q.longName ?? code,
+          price,
+          prevClose,
+          change,
+          changePercent: changePct,
           volume,
           totalSharesK,
           volumeRatio,
-          dayHigh: parseFloat(item.h) || null,
-          dayLow:  parseFloat(item.l) || null,
+          dayHigh: q.regularMarketDayHigh ?? null,
+          dayLow:  q.regularMarketDayLow  ?? null,
         };
       });
   } catch (error: any) {
-    console.error('[ProxyService] Failed to fetch from TWSE:', error.message);
+    console.error('[ProxyService] Failed to fetch from Yahoo Finance:', error.message);
     return [];
   }
 }
