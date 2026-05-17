@@ -47,11 +47,14 @@ function codeFromTicker(ticker: string): string {
   return ticker.replace(/\.(TW|TWO)$/i, '').toUpperCase();
 }
 
-// Convert ticker to TWSE MIS format: 2330.TW → tse_2330.tw, 6488.TWO → otc_6488.tw
-function tickerToMisKey(ticker: string): string {
-  const code     = codeFromTicker(ticker).toLowerCase();
-  const exchange = /\.TWO$/i.test(ticker) ? 'otc' : 'tse';
-  return `${exchange}_${code}.tw`;
+// Convert ticker to TWSE MIS key(s).
+// Bare codes (no .TW/.TWO suffix) return both tse_ and otc_ so the API returns
+// whichever exchange the stock is actually listed on.
+function tickerToMisKeys(ticker: string): string[] {
+  const code = codeFromTicker(ticker).toLowerCase();
+  if (/\.TWO$/i.test(ticker)) return [`otc_${code}.tw`];
+  if (/\.TW$/i.test(ticker))  return [`tse_${code}.tw`];
+  return [`tse_${code}.tw`, `otc_${code}.tw`];
 }
 
 // ── TWSE MIS API (primary) ────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ async function fetchTwseMis(symbols: string[]): Promise<Map<string, TwseQuoteRaw
   const result = new Map<string, TwseQuoteRaw>();
   if (symbols.length === 0) return result;
 
-  const exCh = symbols.map(tickerToMisKey).join('|');
+  const exCh = symbols.flatMap(tickerToMisKeys).join('|');
   try {
     const res = await axios.get(
       `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${exCh}&json=1&delay=0`,
@@ -165,7 +168,7 @@ async function fetchYahooChart(ticker: string): Promise<YahooChartResult | null>
       name:    meta.shortName ?? meta.longName ?? codeFromTicker(ticker),
     };
   } catch (e: any) {
-    console.error(`[ProxyService] Yahoo Finance fallback failed for ${ticker}:`, e.message);
+    console.error(`[ProxyService] Yahoo Finance fallback failed for ${ticker}:`, e?.message || e?.code || String(e));
     return null;
   }
 }
@@ -173,7 +176,8 @@ async function fetchYahooChart(ticker: string): Promise<YahooChartResult | null>
 function buildFromYahoo(
   symbol: string,
   chart: YahooChartResult,
-  sharesMap: Map<string, number>
+  sharesMap: Map<string, number>,
+  preferredName?: string
 ): QuoteData {
   const code      = codeFromTicker(symbol);
   const { price, prevClose, volume, dayHigh, dayLow, name } = chart;
@@ -191,7 +195,7 @@ function buildFromYahoo(
 
   return {
     symbol,
-    name,
+    name: preferredName || name,
     price,
     prevClose,
     change,
@@ -216,7 +220,12 @@ export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
   ]);
 
   const results: QuoteData[] = [];
-  const fallbackSymbols: string[] = [];
+  const fallbackItems: {
+    symbol:     string;
+    yahooTicker: string;
+    twseName?:  string;
+    twseYPrice?: string;   // TWSE prevClose (y field) — last-resort price when Yahoo fails
+  }[] = [];
 
   for (const symbol of symbols) {
     const code = codeFromTicker(symbol);
@@ -226,15 +235,46 @@ export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
       const q = buildFromTwse(symbol, row, sharesMap);
       if (q) { results.push(q); continue; }
     }
-    fallbackSymbols.push(symbol);
+    // Determine correct Yahoo Finance ticker (needs exchange suffix)
+    let yahooTicker = symbol;
+    if (!/\.(TW|TWO)$/i.test(symbol)) {
+      yahooTicker = row?.ex === 'otc' ? `${code}.TWO` : `${code}.TW`;
+    }
+    fallbackItems.push({
+      symbol,
+      yahooTicker,
+      twseName:   row?.n  || undefined,
+      twseYPrice: row?.y  || undefined,
+    });
   }
 
-  if (fallbackSymbols.length > 0) {
-    console.log(`[ProxyService] Falling back to Yahoo Finance for: ${fallbackSymbols.join(', ')}`);
+  if (fallbackItems.length > 0) {
+    console.log(`[ProxyService] Falling back to Yahoo Finance for: ${fallbackItems.map(f => f.symbol).join(', ')}`);
     const yahooResults = await Promise.all(
-      fallbackSymbols.map(async symbol => {
-        const chart = await fetchYahooChart(symbol);
-        return chart ? buildFromYahoo(symbol, chart, sharesMap) : null;
+      fallbackItems.map(async ({ symbol, yahooTicker, twseName, twseYPrice }) => {
+        const chart = await fetchYahooChart(yahooTicker);
+        if (chart) return buildFromYahoo(symbol, chart, sharesMap, twseName);
+
+        // Yahoo unavailable: render card using TWSE prevClose so it doesn't stay "讀取中"
+        const yPrice = parseFloat(twseYPrice ?? '');
+        if (!isNaN(yPrice) && yPrice > 0) {
+          const code        = codeFromTicker(symbol);
+          const totalShares = sharesMap.get(code);
+          return {
+            symbol,
+            name:          twseName || code,
+            price:         yPrice,
+            prevClose:     yPrice,
+            change:        0,
+            changePercent: 0,
+            volume:        0,
+            totalSharesK:  totalShares ? Math.round(totalShares / 1000) : null,
+            volumeRatio:   null,
+            dayHigh:       null,
+            dayLow:        null,
+          } as QuoteData;
+        }
+        return null;
       })
     );
     yahooResults.forEach(q => { if (q) results.push(q); });

@@ -210,4 +210,25 @@ describe('ProxyService.fetchQuotes', () => {
     expect(quotes[0].volume).toBe(5000);
     expect(quotes[0].volumeRatio).not.toBeNull();
   });
+
+  it('finds OTC stocks via otc_ prefix when bare code has no .TWO suffix', async () => {
+    setupMocks({
+      twse: {
+        data: {
+          msgArray: [
+            // tse_2640.tw returns empty; otc_2640.tw returns real data
+            { c: '',     z: '-', y: '-',  v: '0',  h: '-',   l: '-',  n: '',    ex: ''    },
+            { c: '2640', z: '-', y: '165', v: '18', h: '166', l: '161.5', n: '大車隊', ex: 'otc' },
+          ],
+        },
+      },
+    });
+
+    // z="-" → falls back to Yahoo; ticker should be 2640.TWO (otc), not 2640.TW
+    const quotes = await fetchQuotes(['2640']);
+    expect(quotes).toHaveLength(1);
+    // Verify Yahoo was called with .TWO suffix (mock returns yahooChartTsmc data)
+    expect(quotes[0].symbol).toBe('2640');
+    expect(quotes[0].price).toBe(1000);
+  });
 });
