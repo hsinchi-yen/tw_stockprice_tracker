@@ -1,0 +1,35 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker_deployment/Dockerfile.backend
+    container_name: twstock-backend
+    volumes:
+      - ./data:/app/data
+    networks:
+      - twstock-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker_deployment/Dockerfile.frontend
+    container_name: twstock-frontend
+    ports:
+      - "8503:8503"
+    networks:
+      - twstock-net
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  twstock-net:
+    driver: bridge

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>台股戰情看版 TW Stock Tracker</title>
+  <meta name="description" content="台灣股票即時價格、成交量監控看版，支援呼吸燈警示與目標價設定">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── Header ──────────────────────────────────────── -->
+    <header class="header">
+      <div class="header-left">
+        <h1>台股戰情看版</h1>
+        <div class="market-status">
+          <span id="market-dot" class="market-dot closed"></span>
+          <span id="market-label">休市</span>
+        </div>
+        <span class="stock-count">共 <strong id="stock-count">0</strong> 檔</span>
+      </div>
+
+      <div class="header-center">
+        <!-- Single add -->
+        <div class="input-group">
+          <input type="text" id="ticker-input" placeholder="如 2330.TW" autocomplete="off">
+          <button id="add-btn" class="btn btn-primary">+ 新增</button>
+          <button id="batch-btn" class="btn btn-secondary">批次匯入</button>
+          <div class="legend-btn">閃燈說明
+            <div class="legend-popup">
+              <div class="legend-title">警示燈號說明</div>
+              <div class="legend-row">
+                <span class="legend-swatch" style="background:#00e676;box-shadow:0 0 6px #00e676;"></span>
+                <span>綠色閃爍：觸及買入目標價</span>
+              </div>
+              <div class="legend-row">
+                <span class="legend-swatch" style="background:#ff1744;box-shadow:0 0 6px #ff1744;"></span>
+                <span>紅色閃爍：觸及賣出目標價</span>
+              </div>
+              <div class="legend-row">
+                <span class="legend-swatch" style="background:#ffd740;box-shadow:0 0 6px #ffd740;"></span>
+                <span>金色脈衝：週轉率異常（≥ 5%）</span>
+              </div>
+              <div class="legend-row">
+                <span class="legend-swatch" style="background:rgba(40,80,160,0.6);border-color:rgba(100,150,255,0.4);"></span>
+                <span>無燈效：接近目標價或正常</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Sensitivity -->
+        <div class="slider-group">
+          <label>警示敏感度</label>
+          <input type="range" id="sensitivity-slider" min="0.01" max="2.0" step="0.01" value="0.05">
+          <span id="sensitivity-val">0.05%</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <!-- Sort + Row count -->
+        <div class="controls-row">
+          <div class="sort-group">
+            <button id="sort-none"        class="sort-btn active">預設</button>
+            <button id="sort-change-desc" class="sort-btn">漲幅↓</button>
+            <button id="sort-change-asc"  class="sort-btn">跌幅↓</button>
+            <button id="sort-volume-desc" class="sort-btn">量比↓</button>
+          </div>
+          <div class="rows-group">
+            <label>列數</label>
+            <button id="rows-4" class="rows-btn">4列</button>
+            <button id="rows-5" class="rows-btn">5列</button>
+            <button id="rows-6" class="rows-btn">6列</button>
+          </div>
+          <div class="search-group">
+            <input type="text" id="search-input" placeholder="搜尋股號" autocomplete="off">
+            <button id="search-btn">🔍</button>
+          </div>
+        </div>
+        <!-- Pagination + Refresh -->
+        <div class="pagination">
+          <button id="first-page">«</button>
+          <button id="prev-page">◀</button>
+          <span>第 <span id="current-page">1</span> / <span id="total-pages">1</span> 頁</span>
+          <button id="next-page">▶</button>
+          <button id="last-page">»</button>
+          <button id="refresh-btn" class="btn btn-refresh">⟳ 刷新</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Grid ────────────────────────────────────────── -->
+    <main id="grid-container" class="grid"></main>
+
+  </div>
+
+  <!-- ── Batch Import Modal ─────────────────────────────── -->
+  <div id="batch-modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <h2>批次匯入股票代號</h2>
+      <p>以逗號、空格或換行分隔，例如：<code>2330, 2317, 2454</code></p>
+      <textarea id="batch-input" rows="6" placeholder="2330&#10;2317&#10;2454&#10;3008"></textarea>
+      <div class="modal-actions">
+        <button id="batch-cancel" class="btn btn-secondary">取消</button>
+        <button id="batch-submit" class="btn btn-primary">匯入</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>
