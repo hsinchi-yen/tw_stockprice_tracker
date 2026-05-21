@@ -34,16 +34,22 @@ router.post('/', (req: Request, res: Response) => {
 
 // PATCH-style PUT: only updates fields that are present in the request body.
 // Sending { buyTarget: 950 } will NOT touch sellTarget in the DB.
+const ALLOWED_UPDATE_COLS: Record<string, string> = {
+  buyTarget:  'buy_target',
+  sellTarget: 'sell_target',
+};
+
 router.put('/:ticker', (req: Request, res: Response) => {
   const { ticker } = req.params;
   const { buyTarget, sellTarget } = req.body;
 
   const fields: Array<[string, number | null]> = [];
-  if (buyTarget  !== undefined) fields.push(['buy_target',  buyTarget  ?? null]);
-  if (sellTarget !== undefined) fields.push(['sell_target', sellTarget ?? null]);
+  if (buyTarget  !== undefined) fields.push([ALLOWED_UPDATE_COLS.buyTarget,  buyTarget  ?? null]);
+  if (sellTarget !== undefined) fields.push([ALLOWED_UPDATE_COLS.sellTarget, sellTarget ?? null]);
 
   if (fields.length === 0) return res.json({ ok: true });
 
+  // Column names come exclusively from ALLOWED_UPDATE_COLS — safe from injection.
   const setClauses = fields.map(([col]) => `${col} = ?`).join(', ');
   const values     = [...fields.map(([, v]) => v), ticker];
   const info = db.prepare(`UPDATE stocks SET ${setClauses} WHERE ticker = ?`).run(...values);

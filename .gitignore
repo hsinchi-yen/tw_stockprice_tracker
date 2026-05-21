@@ -3,3 +3,7 @@ dist/
 data/
 *.db
 .agents/
+deploy/
+*.tar
+*.tar.gz
+skills-lock.json

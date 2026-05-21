@@ -13,7 +13,10 @@ let gridRows    = parseInt(localStorage.getItem('twstock-rows') ?? '5', 10) as 4
 
 function cardsPerPage() { return 6 * gridRows; }
 
-let nearingBandFraction = 0.0005; // fraction: 0.0005 = 0.05% proximity band
+// Restore persisted sensitivity; default 0.05%
+const _savedSens = parseFloat(localStorage.getItem('twstock-sensitivity') ?? '0.05');
+let nearingBandFraction = _savedSens / 100;
+
 const VOLUME_THRESHOLD    = 5.0;  // S1: 5% turnover rate = notable volume
 const MOMENTUM_MIN_PCT    = 0.05; // S2: show velocity indicator when ≥ 0.05% move per refresh
 const REFRESH_OPEN_MS     = 15_000;   // poll interval during market hours
@@ -42,9 +45,10 @@ function saveCustomOrder(tickers: string[]) {
 function applyCustomOrder(stocks: StockConfig[]): StockConfig[] {
   const saved = loadCustomOrder();
   if (saved.length === 0) return stocks;
-  const map     = new Map(stocks.map(s => [s.ticker, s]));
-  const ordered = saved.filter(t => map.has(t)).map(t => map.get(t)!);
-  const rest    = stocks.filter(s => !saved.includes(s.ticker));
+  const map      = new Map(stocks.map(s => [s.ticker, s]));
+  const savedSet = new Set(saved);                                   // O(1) lookup
+  const ordered  = saved.filter(t => map.has(t)).map(t => map.get(t)!);
+  const rest     = stocks.filter(s => !savedSet.has(s.ticker));     // was O(n²)
   return [...ordered, ...rest];
 }
 
@@ -59,6 +63,8 @@ function getMarketStatus(): 'open' | 'closed' {
   return mins >= 9 * 60 && mins < 13 * 60 + 30 ? 'open' : 'closed';
 }
 
+let _lastKnownMarketStatus: 'open' | 'closed' | null = null;
+
 function updateMarketStatus() {
   const status = getMarketStatus();
   const dot    = document.getElementById('market-dot')!;
@@ -66,9 +72,14 @@ function updateMarketStatus() {
   dot.className  = `market-dot ${status}`;
   label.textContent = status === 'open' ? '盤中' : '休市';
 
-  clearInterval(refreshTimer);
-  const interval = status === 'open' ? REFRESH_OPEN_MS : REFRESH_CLOSED_MS;
-  refreshTimer   = window.setInterval(doRefresh, interval);
+  // Only reset the refresh timer when the market status actually changes,
+  // to avoid restarting the interval every 10s even if nothing changed.
+  if (status !== _lastKnownMarketStatus) {
+    _lastKnownMarketStatus = status;
+    clearInterval(refreshTimer);
+    const interval = status === 'open' ? REFRESH_OPEN_MS : REFRESH_CLOSED_MS;
+    refreshTimer   = window.setInterval(doRefresh, interval);
+  }
 }
 
 // ── Sorting ───────────────────────────────────────────────────────────────────
@@ -88,6 +99,21 @@ function setSortMode(mode: SortMode) {
   document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`sort-${mode}`)?.classList.add('active');
   renderGrid();
+}
+
+// ── Toast notifications ───────────────────────────────────────────────────────
+function showToast(msg: string, type: 'info' | 'error' = 'info') {
+  const container = document.getElementById('toast-container')!;
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  // Trigger transition on next frame
+  requestAnimationFrame(() => el.classList.add('toast-visible'));
+  setTimeout(() => {
+    el.classList.remove('toast-visible');
+    el.addEventListener('transitionend', () => el.remove(), { once: true });
+  }, 3500);
 }
 
 // ── Grid & Cards ──────────────────────────────────────────────────────────────
@@ -157,10 +183,12 @@ function buildCard(stock: StockConfig): HTMLElement {
     stock.sellTarget = isNaN(v) ? null : v;
   });
   card.querySelector('.remove-btn')!.addEventListener('click', async () => {
+    if (!confirm(`確認移除 ${tickerShort}？目標價設定將一併刪除。`)) return;
     await removeStock(stock.ticker);
     allStocks = allStocks.filter(s => s.ticker !== stock.ticker);
     quoteCache.delete(stock.ticker);
     renderGrid();
+    showToast(`已移除 ${tickerShort}`);
   });
 
   // Drag-and-drop reorder
@@ -243,10 +271,12 @@ async function doRefresh() {
   const pageStocks = sorted.slice(start, start + cardsPerPage());
   if (pageStocks.length === 0) return;
 
+  const refreshBtn = document.getElementById('refresh-btn');
+  refreshBtn?.classList.add('loading');
+
   try {
     const quotes = await fetchQuotes(pageStocks.map(s => s.ticker));
     quotes.forEach((q: QuoteData) => {
-      // Preserve prevPrice for S2 momentum before overwriting cache
       const prev = quoteCache.get(q.symbol);
       quoteCache.set(q.symbol, { ...q, prevPrice: prev?.price });
     });
@@ -255,8 +285,24 @@ async function doRefresh() {
       const q    = quoteCache.get(stock.ticker);
       if (card && q) applyQuoteToCard(card, stock, q);
     });
+
+    // Update last-refreshed timestamp
+    const now = new Date();
+    const hh  = String(now.getHours()).padStart(2, '0');
+    const mm  = String(now.getMinutes()).padStart(2, '0');
+    const ss  = String(now.getSeconds()).padStart(2, '0');
+    const el  = document.getElementById('last-updated');
+    if (el) el.textContent = `更新 ${hh}:${mm}:${ss}`;
+
+    // Clear any prior error banner
+    const banner = document.getElementById('error-banner');
+    if (banner) banner.style.display = 'none';
   } catch (e) {
     console.error('Failed to fetch prices', e);
+    const banner = document.getElementById('error-banner');
+    if (banner) banner.style.display = 'flex';
+  } finally {
+    refreshBtn?.classList.remove('loading');
   }
 }
 
@@ -301,11 +347,18 @@ async function submitBatch() {
   const raw     = (document.getElementById('batch-input') as HTMLTextAreaElement).value;
   const tickers = raw.split(/[\s,，\n]+/).map(t => t.trim().toUpperCase()).filter(Boolean);
   if (tickers.length === 0) return closeBatchModal();
+  const prevCount = allStocks.length;
   await addStocks(tickers);
   allStocks = await getStocks();
+  const added = allStocks.length - prevCount;
+  const dup   = tickers.length - added;
   closeBatchModal();
   renderGrid();
   doRefresh();
+  const msg = added > 0
+    ? `已新增 ${added} 檔${dup > 0 ? `，${dup} 檔已存在略過` : ''}`
+    : `${dup} 檔已存在，無新增`;
+  showToast(msg);
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -320,6 +373,7 @@ async function setupEvents() {
     tickerInput.value = '';
     renderGrid();
     doRefresh();
+    showToast(`已新增 ${raw.replace(/\.(TW|TWO)$/i, '')}`);
   };
   addBtn.addEventListener('click', doAdd);
   tickerInput.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') doAdd(); });
@@ -330,10 +384,14 @@ async function setupEvents() {
   document.getElementById('refresh-btn')!.addEventListener('click', doRefresh);
 
   const slider = document.getElementById('sensitivity-slider') as HTMLInputElement;
+  // Restore persisted value into the slider UI on startup
+  slider.value = String(_savedSens);
+  (document.getElementById('sensitivity-val') as HTMLElement).textContent = `${_savedSens}%`;
   slider.addEventListener('input', (e: any) => {
     const v = parseFloat((e.target as HTMLInputElement).value);
     (document.getElementById('sensitivity-val') as HTMLElement).textContent = `${v}%`;
     nearingBandFraction = v / 100;
+    localStorage.setItem('twstock-sensitivity', String(v));
   });
 
   (['none', 'change-desc', 'change-asc', 'volume-desc'] as SortMode[]).forEach(m => {
@@ -370,7 +428,8 @@ async function init() {
   allStocks = await getStocks();
   renderGrid();
   updateMarketStatus();
-  setInterval(updateMarketStatus, 60000);
+  // Check every 10s so open/close transitions take effect within 10s rather than 60s.
+  setInterval(updateMarketStatus, 10_000);
   doRefresh();
   await setupEvents();
 }

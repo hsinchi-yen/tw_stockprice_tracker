@@ -6,7 +6,8 @@
   <title>台股戰情看版 TW Stock Tracker</title>
   <meta name="description" content="台灣股票即時價格、成交量監控看版，支援呼吸燈警示與目標價設定">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+  <!-- display=optional: skips font load on offline/embedded devices instead of blocking render -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@700&display=optional" rel="stylesheet">
   <link rel="stylesheet" href="./src/style.css">
 </head>
 <body>
@@ -87,7 +88,10 @@
           <button id="next-page">▶</button>
           <button id="last-page">»</button>
           <button id="refresh-btn" class="btn btn-refresh">⟳ 刷新</button>
+          <span id="last-updated">—</span>
         </div>
+        <!-- Error banner: shown when all quote sources fail -->
+        <div id="error-banner">⚠ 無法取得報價，顯示最後已知數據</div>
       </div>
     </header>
 
@@ -108,6 +112,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Toast notification container -->
+  <div id="toast-container"></div>
 
   <script type="module" src="./src/main.ts"></script>
 </body>

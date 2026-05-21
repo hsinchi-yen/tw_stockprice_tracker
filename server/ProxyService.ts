@@ -19,6 +19,11 @@ let sharesCache: Map<string, number> = new Map();
 let sharesCacheDate = '';
 let sharesFetchPromise: Promise<Map<string, number>> | null = null;
 
+// ── Server-side quote cache (15s TTL) ─────────────────────────────────────────
+// Prevents duplicate TWSE/Yahoo requests when multiple browser tabs poll simultaneously.
+const SERVER_QUOTE_TTL = 15_000;
+const serverQuoteCache = new Map<string, { data: QuoteData; ts: number }>();
+
 async function loadTotalShares(): Promise<Map<string, number>> {
   const today = new Date().toISOString().split('T')[0];
   if (sharesCacheDate === today && sharesCache.size > 0) return sharesCache;
@@ -215,18 +220,39 @@ function buildFromYahoo(
   };
 }
 
+// Called at server startup to warm the shares cache so the first quote request is fast.
+export async function warmupShares(): Promise<void> {
+  await loadTotalShares();
+}
+
+// Clears the server-side quote cache. Used in tests to prevent cache bleed between cases.
+export function clearQuoteCache(): void {
+  serverQuoteCache.clear();
+}
+
 // ── Quote fetcher ─────────────────────────────────────────────────────────────
 // Primary: TWSE MIS API — real-time batch quotes, no auth, works on ARM
 // Fallback: Yahoo Finance v8/chart — used when TWSE returns z="-" (market closed) or fails
 export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
   if (symbols.length === 0) return [];
 
+  // Serve from server-side cache for any symbols still fresh (< 15s old).
+  const now = Date.now();
+  const cached: QuoteData[] = [];
+  const toFetch: string[]   = [];
+  for (const sym of symbols) {
+    const entry = serverQuoteCache.get(sym);
+    if (entry && now - entry.ts < SERVER_QUOTE_TTL) cached.push(entry.data);
+    else toFetch.push(sym);
+  }
+  if (toFetch.length === 0) return cached;
+
   const [sharesMap, twseMap] = await Promise.all([
     loadTotalShares(),
-    fetchTwseMis(symbols),
+    fetchTwseMis(toFetch),
   ]);
 
-  const results: QuoteData[] = [];
+  const freshResults: QuoteData[] = [];
   const fallbackItems: {
     symbol:     string;
     yahooTicker: string;
@@ -234,13 +260,13 @@ export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
     twseYPrice?: string;   // TWSE prevClose (y field) — last-resort price when Yahoo fails
   }[] = [];
 
-  for (const symbol of symbols) {
+  for (const symbol of toFetch) {
     const code = codeFromTicker(symbol);
     const row  = twseMap.get(code);
 
     if (row && row.z !== '-' && row.z !== '') {
       const q = buildFromTwse(symbol, row, sharesMap);
-      if (q) { results.push(q); continue; }
+      if (q) { freshResults.push(q); continue; }
     }
     // Determine correct Yahoo Finance ticker (needs exchange suffix)
     let yahooTicker = symbol;
@@ -284,8 +310,12 @@ export async function fetchQuotes(symbols: string[]): Promise<QuoteData[]> {
         return null;
       })
     );
-    yahooResults.forEach(q => { if (q) results.push(q); });
+    yahooResults.forEach(q => { if (q) freshResults.push(q); });
   }
 
-  return results;
+  // Store fresh results in server-side cache.
+  const fetchedAt = Date.now();
+  freshResults.forEach(q => serverQuoteCache.set(q.symbol, { data: q, ts: fetchedAt }));
+
+  return [...cached, ...freshResults];
 }

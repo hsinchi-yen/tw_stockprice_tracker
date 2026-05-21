@@ -1,4 +1,4 @@
-import { fetchQuotes } from './ProxyService';
+import { fetchQuotes, clearQuoteCache } from './ProxyService';
 import axios from 'axios';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -75,6 +75,7 @@ function setupMocks(opts: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearQuoteCache();
   setupMocks();
 });
 
